@@ -101,15 +101,21 @@ fn read_xmp_file(path: &Path) -> Result<String> {
     let shown = path.display();
     let io = |e: std::io::Error| failed(format!("{shown}: {e}"));
     let too_large = || failed(format!("{shown}: an XMP file is at most {} MB", MAX_XMP_FILE >> 20));
+    let not_a_file = || failed(format!("{shown}: not a regular file"));
     let meta = std::fs::metadata(path).map_err(io)?;
     if !meta.is_file() {
-        return Err(failed(format!("{shown}: not a regular file")));
+        return Err(not_a_file());
     }
     if meta.len() > MAX_XMP_FILE {
         return Err(too_large());
     }
+    let file = std::fs::File::open(path).map_err(io)?;
+    // Checked again on what was opened, in case the path was replaced after the check above.
+    if !file.metadata().map_err(io)?.is_file() {
+        return Err(not_a_file());
+    }
     let mut bytes = Vec::new();
-    std::fs::File::open(path).map_err(io)?.take(MAX_XMP_FILE + 1).read_to_end(&mut bytes).map_err(io)?;
+    file.take(MAX_XMP_FILE + 1).read_to_end(&mut bytes).map_err(io)?;
     if bytes.len() as u64 > MAX_XMP_FILE {
         return Err(too_large());
     }
@@ -1138,7 +1144,7 @@ impl Automation {
                     n.as_i64().map(|n| n.to_string()).ok_or_else(|| bad(format!("rating is a whole number from -1 to 5, not {n}")))?
                 }
                 (F::CopyrightStatus, Some(Value::String(s))) => match s.as_str() {
-                    "unknown" => String::new(),
+                    "unknown" | "" => String::new(),
                     "copyrighted" => "True".into(),
                     "public_domain" => "False".into(),
                     o => return Err(bad(format!("copyright_status is unknown, copyrighted or public_domain, not {o:?}"))),

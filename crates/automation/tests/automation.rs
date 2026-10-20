@@ -314,8 +314,11 @@ fn additional_metadata_is_read_changed_imported_and_exported_through_the_tools()
         assert!(a.call("doc_xmp", &args).is_err(), "{bad}");
     }
     // Removed with an empty string.
-    let x = ok(&mut a, "doc_xmp", json!({ "doc": doc, "rating": "", "copyright_status": "unknown" }))["xmp"].clone();
+    let x = ok(&mut a, "doc_xmp", json!({ "doc": doc, "rating": "", "copyright_status": "" }))["xmp"].clone();
     assert_eq!((x["rating"].clone(), x["copyright_status"].clone(), x["author_title"].clone()), (Value::Null, json!("unknown"), json!("Editor")));
+    // "unknown", the status it reads back as, removes it too.
+    ok(&mut a, "doc_xmp", json!({ "doc": doc, "copyright_status": "copyrighted" }));
+    assert_eq!(ok(&mut a, "doc_xmp", json!({ "doc": doc, "copyright_status": "unknown" }))["xmp"]["copyright_status"], "unknown");
 
     // Export, then import into another document.
     let out = ok(&mut a, "doc_xmp_export", json!({ "doc": doc, "path": "out/meta.xmp" }));

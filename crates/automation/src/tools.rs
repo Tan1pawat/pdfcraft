@@ -165,7 +165,7 @@ pub fn tools() -> Vec<ToolDef> {
                     "author_title": { "type": "string" },
                     "description_writer": { "type": "string" },
                     "rating": { "description": "A whole number from -1 to 5, or an empty string to remove it." },
-                    "copyright_status": { "type": "string", "enum": ["unknown", "copyrighted", "public_domain"] },
+                    "copyright_status": { "type": "string", "enum": ["unknown", "copyrighted", "public_domain", ""], "description": "\"unknown\" or an empty string removes it." },
                     "copyright_notice": { "type": "string" },
                     "copyright_url": { "type": "string" },
                     "packet": { "type": "boolean", "description": "Also return the whole XMP packet as text. Default false." },

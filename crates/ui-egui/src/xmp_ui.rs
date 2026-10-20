@@ -32,8 +32,13 @@ fn read_import(path: &std::path::Path) -> Result<String, String> {
     if meta.len() > MAX_IMPORT {
         return Err(too_large());
     }
+    let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    // Checked again on what was opened, in case the path was replaced after the check above.
+    if !file.metadata().map_err(|e| e.to_string())?.is_file() {
+        return Err("not a regular file".into());
+    }
     let mut bytes = Vec::new();
-    std::fs::File::open(path).and_then(|f| f.take(MAX_IMPORT + 1).read_to_end(&mut bytes)).map_err(|e| e.to_string())?;
+    file.take(MAX_IMPORT + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
     if bytes.len() as u64 > MAX_IMPORT {
         return Err(too_large());
     }
