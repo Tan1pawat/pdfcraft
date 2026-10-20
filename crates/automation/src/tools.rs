@@ -169,7 +169,7 @@ pub fn tools() -> Vec<ToolDef> {
                     "copyright_notice": { "type": "string" },
                     "copyright_url": { "type": "string" },
                     "packet": { "type": "boolean", "description": "Also return the whole XMP packet as text. Default false." },
-                    "schemas": { "type": "boolean", "description": "Also return the packet's properties grouped by schema. Default false." }
+                    "schemas": { "type": "boolean", "description": "Also return the packet's properties grouped by schema (null, with schemas_error saying why, when the packet isn't well-formed XMP). Default false." }
                 }),
                 &["doc"],
             )),

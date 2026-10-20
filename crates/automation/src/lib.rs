@@ -93,6 +93,29 @@ const XMP_FIELDS: [(&str, pdfcraft_engine::XmpField); 6] = {
 /// The largest .xmp file `doc_xmp_replace` reads: the size the packet check accepts.
 const MAX_XMP_FILE: u64 = 8 << 20;
 
+/// Read the .xmp file at `path` (already resolved) for `doc_xmp_replace`: a regular UTF-8 file of
+/// at most [`MAX_XMP_FILE`] bytes. A directory, a device or a FIFO is refused before it is opened,
+/// and a file that grows past the cap while it is read is refused too.
+fn read_xmp_file(path: &Path) -> Result<String> {
+    use std::io::Read;
+    let shown = path.display();
+    let io = |e: std::io::Error| failed(format!("{shown}: {e}"));
+    let too_large = || failed(format!("{shown}: an XMP file is at most {} MB", MAX_XMP_FILE >> 20));
+    let meta = std::fs::metadata(path).map_err(io)?;
+    if !meta.is_file() {
+        return Err(failed(format!("{shown}: not a regular file")));
+    }
+    if meta.len() > MAX_XMP_FILE {
+        return Err(too_large());
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::open(path).map_err(io)?.take(MAX_XMP_FILE + 1).read_to_end(&mut bytes).map_err(io)?;
+    if bytes.len() as u64 > MAX_XMP_FILE {
+        return Err(too_large());
+    }
+    String::from_utf8(bytes).map_err(|_| failed(format!("{shown}: an XMP file must be UTF-8 text")))
+}
+
 fn failed(e: impl std::fmt::Display) -> ToolError {
     ToolError::Failed(e.to_string())
 }
@@ -226,16 +249,7 @@ impl Automation {
             "doc_xmp_replace" => {
                 let packet = match (a.opt_str("packet")?, a.opt_str("path")?) {
                     (Some(packet), None) => packet.to_owned(),
-                    (None, Some(path)) => {
-                        let path = self.resolve(path, false)?;
-                        let shown = path.display();
-                        let len = std::fs::metadata(&path).map_err(|e| failed(format!("{shown}: {e}")))?.len();
-                        if len > MAX_XMP_FILE {
-                            return Err(failed(format!("{shown}: an XMP file is at most {} MB", MAX_XMP_FILE >> 20)));
-                        }
-                        let bytes = std::fs::read(&path).map_err(|e| failed(format!("{shown}: {e}")))?;
-                        String::from_utf8(bytes).map_err(|_| failed(format!("{shown}: an XMP file must be UTF-8 text")))?
-                    }
+                    (None, Some(path)) => read_xmp_file(&self.resolve(path, false)?)?,
                     _ => {
                         return Err(ToolError::InvalidArgs(
                             "give either path (an .xmp file to import) or packet (the XML as text; \"\" removes the XMP metadata)".into(),
@@ -1171,7 +1185,11 @@ impl Automation {
                     .iter()
                     .map(|s| json!({ "prefix": s.prefix, "namespace": s.namespace, "properties": s.properties.iter().map(node).collect::<Vec<_>>() }))
                     .collect(),
-                Some(Err(e)) => return Err(failed(e)),
+                // Any fields asked for are already changed, so the call still succeeds.
+                Some(Err(e)) => {
+                    xmp.insert("schemas_error".into(), json!(e));
+                    Value::Null
+                }
             };
             xmp.insert("schemas".into(), schemas);
         }

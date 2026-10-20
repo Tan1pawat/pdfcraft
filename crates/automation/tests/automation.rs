@@ -337,6 +337,19 @@ fn additional_metadata_is_read_changed_imported_and_exported_through_the_tools()
     ] {
         assert!(a.call("doc_xmp_replace", &args).is_err(), "{args}");
     }
+    // Larger than the packet check takes, and what isn't a regular file (a FIFO would block the
+    // read), are refused before they are read.
+    std::fs::write(dir.join("big.xmp"), vec![b' '; (8 << 20) + 1]).unwrap();
+    std::fs::create_dir_all(dir.join("folder.xmp")).unwrap();
+    let mut refused = vec![("big.xmp", "at most 8 MB"), ("folder.xmp", "not a regular file")];
+    #[cfg(unix)]
+    if std::process::Command::new("mkfifo").arg(dir.join("pipe.xmp")).status().is_ok_and(|s| s.success()) {
+        refused.push(("pipe.xmp", "not a regular file"));
+    }
+    for (path, why) in refused {
+        let e = err(&mut a, "doc_xmp_replace", json!({ "doc": other, "path": path })).to_string();
+        assert!(e.contains(why), "{path}: {e}");
+    }
     assert_eq!(ok(&mut a, "doc_xmp", json!({ "doc": other }))["xmp"]["author_title"], "Editor");
     // Removed, then saved: the saved file has none.
     ok(&mut a, "doc_xmp_replace", json!({ "doc": other, "packet": "" }));
@@ -347,6 +360,42 @@ fn additional_metadata_is_read_changed_imported_and_exported_through_the_tools()
     assert_eq!(ok(&mut b, "doc_xmp", json!({ "doc": plain }))["xmp"]["has_xmp"], false);
     let rights = ok(&mut b, "doc_open", json!({ "path": "out/rights.pdf" }))["doc"].as_u64().unwrap();
     assert_eq!(ok(&mut b, "doc_xmp", json!({ "doc": rights }))["xmp"]["copyright_notice"], "© 2026 Demo");
+}
+
+/// A packet that isn't well-formed XML but has an `rdf:RDF` to add to: the field is changed, and
+/// the schema list reports why it is missing instead of failing a call whose edit was made.
+#[test]
+fn additional_metadata_reports_a_schema_list_it_cannot_read_after_the_edit() {
+    let dir = workdir("xmp-unreadable-schemas");
+    let xmp = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\
+               <rdf:Description rdf:about=\"\"><dc:title>unclosed</rdf:Description></rdf:RDF></x:xmpmeta>";
+    let objs = [
+        "<< /Type /Catalog /Pages 2 0 R /Metadata 4 0 R >>".to_owned(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_owned(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] >>".to_owned(),
+        format!("<< /Type /Metadata /Subtype /XML /Length {} >>\nstream\n{xmp}\nendstream", xmp.len()),
+    ];
+    let mut pdf = b"%PDF-1.7\n".to_vec();
+    let mut offsets = Vec::new();
+    for (i, o) in objs.iter().enumerate() {
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(format!("{} 0 obj\n{o}\nendobj\n", i + 1).as_bytes());
+    }
+    let xref = pdf.len();
+    pdf.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1).as_bytes());
+    for o in offsets {
+        pdf.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
+    }
+    pdf.extend_from_slice(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objs.len() + 1).as_bytes());
+    std::fs::write(dir.join("broken-xmp.pdf"), pdf).unwrap();
+    let mut a = auto(&dir);
+    let doc = ok(&mut a, "doc_open", json!({ "path": "broken-xmp.pdf" }))["doc"].as_u64().unwrap();
+    let x = ok(&mut a, "doc_xmp", json!({ "doc": doc, "copyright_url": "https://example.com/terms", "schemas": true }))["xmp"].clone();
+    assert_eq!((x["copyright_url"].clone(), x["schemas"].clone()), (json!("https://example.com/terms"), Value::Null), "{x}");
+    assert!(x["schemas_error"].as_str().is_some_and(|e| e.contains("well-formed")), "{x}");
+    // The edit is one undo step like any other.
+    ok(&mut a, "edit_undo", json!({ "doc": doc }));
+    assert_eq!(ok(&mut a, "doc_xmp", json!({ "doc": doc }))["xmp"]["copyright_url"], Value::Null);
 }
 
 /// The custom list `doc_info` shows when a file opens is the one it shows after an unrelated

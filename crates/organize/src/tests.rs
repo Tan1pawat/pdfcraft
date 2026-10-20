@@ -637,6 +637,33 @@ fn additional_metadata_refuses_packets_it_cannot_edit() {
 }
 
 #[test]
+fn additional_metadata_follows_the_packets_rdf_prefix() {
+    // The RDF namespace bound to `r`, not `rdf`: read, changed and added with the packet's prefix.
+    const RDF: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
+    let xmp = format!(
+        "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><r:RDF xmlns:r='{RDF}'><r:Description r:about=\"uuid:1\" \
+         xmlns:dc=\"http://purl.org/dc/elements/1.1/\"><dc:rights><r:Alt><r:li xml:lang=\"de\">Alle</r:li>\
+         <r:li xml:lang=\"x-default\">All</r:li></r:Alt></dc:rights></r:Description></r:RDF></x:xmpmeta>"
+    );
+    let mut doc = doc_with_xmp(xmp.as_bytes());
+    assert_eq!(xmp_field(&doc, XmpField::CopyrightNotice).as_deref(), Some("All"));
+    set_xmp_field(&mut doc, XmpField::CopyrightNotice, "© Demo").unwrap();
+    set_xmp_field(&mut doc, XmpField::AuthorTitle, "Editor").unwrap();
+    let doc = save_and_reopen(&doc);
+    let xmp = xmp_text(&doc).unwrap();
+    assert_eq!(parsed_value(&xmp, "http://purl.org/dc/elements/1.1/", "rights").as_deref(), Some("© Demo"));
+    assert_eq!(parsed_value(&xmp, PHOTOSHOP, "AuthorsPosition").as_deref(), Some("Editor"));
+    // The added description describes the same resource as the first.
+    let parsed = roxmltree::Document::parse(&xmp).unwrap_or_else(|e| panic!("{e}: {xmp}"));
+    let about: Vec<_> = parsed.descendants().filter(|n| n.has_tag_name((RDF, "Description"))).map(|n| n.attribute((RDF, "about"))).collect();
+    assert_eq!(about, [Some("uuid:1"); 2]);
+    assert_eq!(
+        [XmpField::CopyrightNotice, XmpField::AuthorTitle].map(|f| xmp_field(&doc, f).unwrap_or_default()),
+        ["© Demo", "Editor"].map(String::from)
+    );
+}
+
+#[test]
 fn the_xmp_packet_is_replaced_wrapped_and_removed() {
     let mut doc = doc_with_xmp(LIBREOFFICE_XMP.as_bytes());
     let r = catalog(&doc).reference(b"Metadata").unwrap();
@@ -649,6 +676,13 @@ fn the_xmp_packet_is_replaced_wrapped_and_removed() {
     let xmp = xmp_text(&doc).unwrap();
     assert!(xmp.starts_with("<?xpacket begin=") && xmp.ends_with("<?xpacket end=\"w\"?>"), "{xmp}");
     assert!(!xmp.contains("Untitled 1"));
+    assert_eq!(xmp_field(&doc, XmpField::CopyrightStatus).as_deref(), Some("False"));
+    // An .xmp file's XML declaration must come first, so it is dropped rather than wrapped.
+    let declared = format!("\u{feff}<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n{}", imported.trim_start_matches('\u{feff}'));
+    replace_xmp(&mut doc, &declared).unwrap();
+    let xmp = xmp_text(&save_and_reopen(&doc)).unwrap();
+    assert!(xmp.starts_with("<?xpacket begin=") && !xmp.contains("<?xml"), "{xmp}");
+    roxmltree::Document::parse(&xmp).unwrap_or_else(|e| panic!("{e}: {xmp}"));
     assert_eq!(xmp_field(&doc, XmpField::CopyrightStatus).as_deref(), Some("False"));
     // A packet with its own header is stored as it is.
     replace_xmp(&mut doc, LIBREOFFICE_XMP).unwrap();

@@ -32,6 +32,7 @@ const PDF: &str = "http://ns.adobe.com/pdf/1.3/";
 const XMP: &str = "http://ns.adobe.com/xap/1.0/";
 const XMP_RIGHTS: &str = "http://ns.adobe.com/xap/1.0/rights/";
 const PHOTOSHOP: &str = "http://ns.adobe.com/photoshop/1.0/";
+const RDF: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
 
 /// The packet header and trailer (XMP Specification Part 1 §7.3): the `begin` byte-order mark and
 /// the fixed `id`, and a trailer that lets other tools rewrite the packet in place.
@@ -206,8 +207,9 @@ pub fn set_xmp_field(doc: &mut Document, field: XmpField, value: &str) -> Result
 }
 
 /// Replace the document's XMP packet with `xmp`, or remove it when `xmp` is empty. The text is
-/// stored as given (with a byte-order mark at the start dropped), wrapped in an `xpacket` header
-/// and trailer when it has none; checking that it is well-formed XMP is the caller's.
+/// stored as given (with a byte-order mark and an XML declaration at the start dropped), wrapped
+/// in an `xpacket` header and trailer when it has none; checking that it is well-formed XMP is
+/// the caller's.
 pub fn replace_xmp(doc: &mut Document, xmp: &str) -> Result<(), OrganizeError> {
     let xmp = xmp.trim_start_matches('\u{feff}').trim();
     if xmp.len() > MAX_XMP {
@@ -228,6 +230,12 @@ pub fn replace_xmp(doc: &mut Document, xmp: &str) -> Result<(), OrganizeError> {
         }
         return Ok(());
     }
+    // An .xmp file's `<?xml …?>` declaration must be the first thing in a document, so it can't
+    // follow the header; the stream is UTF-8, the declaration's default, so it is dropped.
+    let xmp = match xmp.strip_prefix("<?xml").filter(|rest| rest.starts_with(|c: char| c.is_ascii_whitespace())) {
+        Some(rest) => rest.find("?>").and_then(|end| rest.get(end + 2..)).unwrap_or(xmp).trim_start(),
+        None => xmp,
+    };
     let text = if xmp.starts_with("<?xpacket") { xmp.to_owned() } else { format!("{PACKET_BEGIN}{xmp}{PACKET_END}") };
     let (r, dict) = existing.map_or((None, metadata_dict()), |(r, d)| (Some(r), d));
     store(doc, r, dict, text)
@@ -262,10 +270,10 @@ fn new_packet(doc: &Document) -> String {
     for key in ["Title", "Author", "Subject", "Keywords", "Creator", "Producer"] {
         let Some(value) = crate::info(doc, key).filter(|v| !v.trim().is_empty()) else { continue };
         let Some((name, _, shape)) = property(key) else { continue };
-        props.push_str(&format!("   {}\n", element(name, shape, value.trim())));
+        props.push_str(&format!("   {}\n", element(name, shape, value.trim(), "rdf")));
     }
     format!(
-        "{PACKET_BEGIN}<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">\n <rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\n\
+        "{PACKET_BEGIN}<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">\n <rdf:RDF xmlns:rdf=\"{RDF}\">\n\
   <rdf:Description rdf:about=\"\" xmlns:dc=\"{DC}\" xmlns:pdf=\"{PDF}\" xmlns:xmp=\"{XMP}\">\n{props}  </rdf:Description>\n\
  </rdf:RDF>\n</x:xmpmeta>{PACKET_END}"
     )
@@ -274,12 +282,13 @@ fn new_packet(doc: &Document) -> String {
 /// The text of the property `name` in `xmp`, element or attribute form; for an `rdf:Alt`,
 /// `rdf:Seq` or `rdf:Bag`, the `x-default` item, else the first. `None` when it is missing or empty.
 fn get_property(xmp: &str, name: &str) -> Option<String> {
+    let rdf = rdf_prefix(xmp);
     let text = if let Some((start, end)) = element_span(xmp, name) {
         let element = xmp.get(start..end)?;
         let inner_start = element.find('>')? + 1;
         // `<dc:rights/>`: no value.
         let inner = element.get(inner_start..)?.strip_suffix(&format!("</{name}>"))?;
-        match list_item(inner) {
+        match list_item(inner, rdf) {
             Some(item) => item,
             None if inner.contains('<') => return None,
             None => inner,
@@ -292,19 +301,21 @@ fn get_property(xmp: &str, name: &str) -> Option<String> {
     (!text.is_empty()).then_some(text)
 }
 
-/// The `x-default` item of the `rdf:li` items in `inner`, else the first.
-fn list_item(inner: &str) -> Option<&str> {
+/// The `x-default` item of the `rdf:li` items in `inner` (RDF bound to the prefix `rdf`), else
+/// the first.
+fn list_item<'a>(inner: &'a str, rdf: &str) -> Option<&'a str> {
+    let (open, close) = (format!("<{rdf}:li"), format!("</{rdf}:li>"));
     let mut first = None;
     let mut from = 0;
-    while let Some(i) = inner.get(from..).and_then(|s| s.find("<rdf:li")).map(|i| i + from) {
-        let after = i + "<rdf:li".len();
+    while let Some(i) = inner.get(from..).and_then(|s| s.find(&open)).map(|i| i + from) {
+        let after = i + open.len();
         from = after;
         if !inner.get(after..).and_then(|s| s.chars().next()).is_some_and(|c| c == '>' || c.is_whitespace()) {
             continue;
         }
         let tag_end = after + inner.get(after..)?.find('>')?;
         let tag = inner.get(after..tag_end)?;
-        let content_end = tag_end + inner.get(tag_end..)?.find("</rdf:li>")?;
+        let content_end = tag_end + inner.get(tag_end..)?.find(&close)?;
         let content = inner.get(tag_end + 1..content_end)?;
         if tag.contains("xml:lang=\"x-default\"") || tag.contains("xml:lang='x-default'") {
             return Some(content);
@@ -353,7 +364,8 @@ fn unescape(s: &str) -> String {
 /// `xmp` with the property `name` (namespace `ns`) set to `value`, or removed when `value` is
 /// empty; `None` when nothing changes or the packet has no `rdf:RDF` to add the property to.
 fn set_property(xmp: &str, name: &str, ns: &str, shape: Shape, value: &str) -> Option<String> {
-    let element = (!value.is_empty()).then(|| element(name, shape, value));
+    let rdf = rdf_prefix(xmp);
+    let element = (!value.is_empty()).then(|| element(name, shape, value, rdf));
     // The element form, `<dc:title>…</dc:title>` (or `<dc:title/>`): replaced where it stands, so
     // it keeps the namespace declaration of the description around it.
     if let Some((start, end)) = element_span(xmp, name) {
@@ -377,34 +389,58 @@ fn set_property(xmp: &str, name: &str, ns: &str, shape: Shape, value: &str) -> O
         out.push_str(xmp.get(..start)?);
         out.push_str(xmp.get(value_end + 1..)?);
         return match element {
-            Some(e) => insert_description(&out, name, ns, &e),
+            Some(e) => insert_description(&out, name, ns, &e, rdf),
             None => Some(out),
         };
     }
-    insert_description(xmp, name, ns, element.as_deref()?)
+    insert_description(xmp, name, ns, element.as_deref()?, rdf)
 }
 
-/// The property `name` holding `value`, as an element.
-fn element(name: &str, shape: Shape, value: &str) -> String {
+/// The property `name` holding `value`, as an element (RDF bound to the prefix `rdf`).
+fn element(name: &str, shape: Shape, value: &str, rdf: &str) -> String {
     match shape {
-        Shape::LangAlt => format!("<{name}><rdf:Alt><rdf:li xml:lang=\"x-default\">{}</rdf:li></rdf:Alt></{name}>", esc(value)),
-        Shape::Seq => format!("<{name}><rdf:Seq><rdf:li>{}</rdf:li></rdf:Seq></{name}>", esc(value)),
+        Shape::LangAlt => format!("<{name}><{rdf}:Alt><{rdf}:li xml:lang=\"x-default\">{}</{rdf}:li></{rdf}:Alt></{name}>", esc(value)),
+        Shape::Seq => format!("<{name}><{rdf}:Seq><{rdf}:li>{}</{rdf}:li></{rdf}:Seq></{name}>", esc(value)),
         Shape::Text => format!("<{name}>{}</{name}>", esc(value)),
     }
 }
 
 /// `xmp` with a new `rdf:Description` holding `element` (and declaring its namespace) as the last
-/// description of the packet.
-fn insert_description(xmp: &str, name: &str, ns: &str, element: &str) -> Option<String> {
+/// description of the packet (RDF bound to the prefix `rdf`).
+fn insert_description(xmp: &str, name: &str, ns: &str, element: &str, rdf: &str) -> Option<String> {
     let prefix = name.split(':').next()?;
-    let at = xmp.rfind("</rdf:RDF>")?;
+    let at = xmp.rfind(&format!("</{rdf}:RDF>"))?;
     // Every description of a packet describes the same resource (XMP: one `rdf:about` value).
-    let about = attribute_span(xmp, "rdf:about").and_then(|(_, s, e, _)| xmp.get(s..e)).unwrap_or_default().replace('"', "&quot;");
+    let about = attribute_span(xmp, &format!("{rdf}:about")).and_then(|(_, s, e, _)| xmp.get(s..e)).unwrap_or_default().replace('"', "&quot;");
     let mut out = String::with_capacity(xmp.len() + element.len() + 128);
     out.push_str(xmp.get(..at)?);
-    out.push_str(&format!("<rdf:Description rdf:about=\"{about}\" xmlns:{prefix}=\"{ns}\">{element}</rdf:Description>\n"));
+    out.push_str(&format!("<{rdf}:Description {rdf}:about=\"{about}\" xmlns:{prefix}=\"{ns}\">{element}</{rdf}:Description>\n"));
     out.push_str(xmp.get(at..)?);
     Some(out)
+}
+
+/// The prefix `xmp` binds to the RDF namespace: `rdf` in nearly every packet, and the answer when
+/// it binds none (or binds it as the default namespace, which isn't edited here).
+fn rdf_prefix(xmp: &str) -> &str {
+    let mut from = 0;
+    while let Some(i) = xmp.get(from..).and_then(|s| s.find(RDF)).map(|i| i + from) {
+        from = i + RDF.len();
+        // `xmlns:r="…"`: the namespace quoted, after `=`, after the declared prefix.
+        let Some(before) = xmp.get(..i) else { continue };
+        let Some(quote) = before.chars().next_back().filter(|c| matches!(c, '"' | '\'')) else { continue };
+        if !xmp.get(from..).is_some_and(|s| s.starts_with(quote)) {
+            continue;
+        }
+        let Some(before) = before.strip_suffix(quote).map(str::trim_end).and_then(|b| b.strip_suffix('=')).map(str::trim_end) else {
+            continue;
+        };
+        let rest = before.trim_end_matches(|c: char| c.is_alphanumeric() || matches!(c, '_' | '-' | '.'));
+        let Some(prefix) = before.get(rest.len()..).filter(|p| !p.is_empty()) else { continue };
+        if rest.strip_suffix("xmlns:").is_some_and(|r| r.ends_with(char::is_whitespace)) {
+            return prefix;
+        }
+    }
+    "rdf"
 }
 
 /// Where the element `name` is in `xmp`, from its `<` to past its end tag (or past `/>`).
@@ -544,7 +580,7 @@ mod tests {
             assert_eq!(get_property(empty, "dc:rights"), None, "{empty}");
         }
         // A look-alike item name is not an item.
-        assert_eq!(list_item("<rdf:list>no</rdf:list><rdf:li>yes</rdf:li>"), Some("yes"));
+        assert_eq!(list_item("<rdf:list>no</rdf:list><rdf:li>yes</rdf:li>", "rdf"), Some("yes"));
     }
 
     #[test]
@@ -574,8 +610,29 @@ mod tests {
                 let _ = set_property(packet, "pdf:Keywords", PDF, Shape::Text, value);
             }
             let _ = get_property(packet, "dc:title");
-            let _ = list_item(packet);
+            let _ = list_item(packet, "rdf");
             let _ = unescape(packet);
+        }
+        for packet in [
+            RDF,
+            "\"http://www.w3.org/1999/02/22-rdf-syntax-ns#",
+            "=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\"",
+            "é xmlns:é='http://www.w3.org/1999/02/22-rdf-syntax-ns#",
+        ] {
+            assert_eq!(rdf_prefix(packet), "rdf", "{packet}");
+        }
+    }
+
+    #[test]
+    fn the_rdf_prefix_is_the_one_the_packet_binds() {
+        let bound = |decl: &str| format!("<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><r:RDF {decl}/></x:xmpmeta>");
+        assert_eq!(rdf_prefix(&bound(&format!("xmlns:r=\"{RDF}\""))), "r");
+        assert_eq!(rdf_prefix(&bound(&format!("xmlns:r_1 = '{RDF}'"))), "r_1");
+        // Not a binding: the default namespace, another attribute, mismatched quotes, a lookalike URI.
+        for decl in
+            [format!("xmlns=\"{RDF}\""), format!("about=\"{RDF}\""), format!("xmlns:r=\"{RDF}'"), format!("xmlns:r=\"{RDF}x\""), String::new()]
+        {
+            assert_eq!(rdf_prefix(&bound(&decl)), "rdf", "{decl}");
         }
     }
 }

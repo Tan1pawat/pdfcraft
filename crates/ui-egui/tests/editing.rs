@@ -991,6 +991,29 @@ fn additional_metadata_is_applied_with_the_description_and_its_packet_exported_d
     assert_eq!(doc.xmp_field(XmpField::CopyrightStatus).as_deref(), Some("True"));
     assert_eq!(doc.can_undo(), Some("Replace XMP metadata"));
     let _ = std::fs::remove_file(&xmp);
+
+    // Larger than the packet check takes, and what isn't a regular file (a FIFO would block the
+    // frame), are refused before they are read, changing nothing.
+    let dir = std::env::temp_dir().join(format!("pdfcraft-ui-xmp-refused-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("folder.xmp")).unwrap();
+    std::fs::write(dir.join("big.xmp"), vec![b' '; (8 << 20) + 1]).unwrap();
+    let mut refused = vec![("big.xmp", "larger than 8 MB"), ("folder.xmp", "not a regular file")];
+    #[cfg(unix)]
+    if std::process::Command::new("mkfifo").arg(dir.join("pipe.xmp")).status().is_ok_and(|s| s.success()) {
+        refused.push(("pipe.xmp", "not a regular file"));
+    }
+    for (name, why) in refused {
+        h.state_mut().toast = None;
+        h.state_mut().save_override = Some(dir.join(name).to_string_lossy().into_owned());
+        h.get_by_label("Import…").click();
+        h.run_steps(3);
+        let toast = h.state().toast.as_ref().map(|t| t.0.clone()).unwrap_or_default();
+        assert!(toast.contains(why), "{name}: {toast}");
+        let app = h.state();
+        assert_eq!(app.session.get(app.views[0].id).unwrap().can_undo(), Some("Replace XMP metadata"), "{name}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

@@ -18,6 +18,28 @@ const MAX_SHOWN: usize = 256 << 10;
 #[cfg(not(target_arch = "wasm32"))]
 const MAX_IMPORT: u64 = 8 << 20;
 
+/// The .xmp file Import reads: a regular UTF-8 file of at most [`MAX_IMPORT`] bytes. A directory,
+/// a device or a FIFO (which would block the frame) is refused before it is opened, and a file
+/// that grows past the cap while it is read is refused too.
+#[cfg(not(target_arch = "wasm32"))]
+fn read_import(path: &std::path::Path) -> Result<String, String> {
+    use std::io::Read;
+    let too_large = || format!("larger than {} MB", MAX_IMPORT >> 20);
+    let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
+    if !meta.is_file() {
+        return Err("not a regular file".into());
+    }
+    if meta.len() > MAX_IMPORT {
+        return Err(too_large());
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::open(path).and_then(|f| f.take(MAX_IMPORT + 1).read_to_end(&mut bytes)).map_err(|e| e.to_string())?;
+    if bytes.len() as u64 > MAX_IMPORT {
+        return Err(too_large());
+    }
+    String::from_utf8(bytes).map_err(|_| "not UTF-8 text".to_owned())
+}
+
 /// The Additional Metadata fields being edited.
 #[derive(Clone, Debug, PartialEq)]
 pub struct XmpDraft {
@@ -225,13 +247,7 @@ impl PdfCraftApp {
         {
             let import = |app: &mut Self, path: std::path::PathBuf| {
                 let name = path.display().to_string();
-                // Sized before it is read: a packet is a few kB, and the check takes at most 8 MB.
-                let read = std::fs::metadata(&path)
-                    .map_err(|e| e.to_string())
-                    .and_then(|m| if m.len() > MAX_IMPORT { Err(format!("larger than {} MB", MAX_IMPORT >> 20)) } else { Ok(()) })
-                    .and_then(|()| std::fs::read(&path).map_err(|e| e.to_string()))
-                    .and_then(|b| String::from_utf8(b).map_err(|_| "not UTF-8 text".to_owned()));
-                match read {
+                match read_import(&path) {
                     Ok(packet) => {
                         if app.apply_edit(Edit::ReplaceXmp { packet }) {
                             app.xmp_draft = None;
